@@ -277,3 +277,137 @@ def job_escaner():
                     enviar_telegram(msg)
                     print(f"✅ Alerta #{alert_id} enviada: {decision} {vivo} (Regla 2)")
     con.close()
+
+
+# ==========================================
+# JOB 3: AUDITOR (Cada 5 minutos)
+# ==========================================
+def job_auditor():
+    try:
+        con = get_db()
+        pendientes = con.execute("SELECT id, event_id, decision, target_line FROM alertas WHERE status='PENDING'").fetchall()
+        con.close()
+        if not pendientes: return
+        
+        r = requests.get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", timeout=15)
+        games = {g["id"]: g for g in r.json().get("events", [])}
+        
+        for p in pendientes:
+            alert_id, event_id, decision, target = p
+            g = games.get(event_id)
+            if not g: continue
+            
+            state = g.get("status", {}).get("type", {}).get("state", "")
+            if state == "post":
+                comp = g.get("competitions", [{}])[0]
+                final_total = sum(int(c.get("score", 0) or 0) for c in comp.get("competitors", []))
+                
+                status = "PUSH"
+                if decision == "OVER":
+                    if final_total > target: status = "WON"
+                    elif final_total < target: status = "LOST"
+                elif decision == "UNDER":
+                    if final_total < target: status = "WON"
+                    elif final_total > target: status = "LOST"
+                    
+                con = get_db()
+                con.execute("UPDATE alertas SET status=?, final_total=? WHERE id=?", (status, final_total, alert_id))
+                con.commit()
+                con.close()
+                print(f"✅ Alerta #{alert_id} resuelta: {status} (Final: {final_total} vs Target: {target})")
+    except Exception as e:
+        print(f"[Auditor Error] {e}")
+
+# ==========================================
+# DASHBOARD WEB (Historial y Stats)
+# ==========================================
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    try:
+        con = get_db()
+        alerts = con.execute("SELECT * FROM alertas ORDER BY id DESC").fetchall()
+        con.close()
+        
+        total = len(alerts)
+        won = sum(1 for a in alerts if a[11] == 'WON')
+        lost = sum(1 for a in alerts if a[11] == 'LOST')
+        pending = sum(1 for a in alerts if a[11] == 'PENDING')
+        
+        # Cálculo de Unidades (Asumiendo apuesta plana de 1 unidad)
+        units = 0.0
+        for a in alerts:
+            if a[11] == 'WON': units += (a[10] - 1.0) # cuota - 1
+            elif a[11] == 'LOST': units -= 1.0
+            
+        win_rate = (won / (won + lost) * 100) if (won + lost) > 0 else 0
+        wr_color = "#16a34a" if win_rate >= 50 else "#dc2626"
+        units_color = "#16a34a" if units >= 0 else "#dc2626"
+
+        html = f"""
+        <html><head><title>Alertas Value</title><meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ font-family: -apple-system, system-ui, sans-serif; background: #f4f6f9; padding: 20px; color: #334155; }}
+            h1 {{ color: #1e293b; }}
+            .cards {{ display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px; }}
+            .card {{ background: #fff; padding: 20px; border-radius: 10px; flex: 1; min-width: 130px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 4px solid #3b82f6; }}
+            .card h3 {{ margin: 0 0 10px 0; color: #64748b; font-size: 13px; text-transform: uppercase; }}
+            .card .val {{ font-size: 28px; font-weight: bold; }}
+            table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; margin-top: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }}
+            th, td {{ padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: center; font-size: 14px; }}
+            th {{ background: #f8fafc; color: #64748b; text-transform: uppercase; font-size: 12px; }}
+            .won {{ color: #16a34a; font-weight: bold; background: #dcfce7; padding: 4px 8px; border-radius: 4px; }}
+            .lost {{ color: #dc2626; font-weight: bold; background: #fee2e2; padding: 4px 8px; border-radius: 4px; }}
+            .pending {{ color: #ca8a04; font-weight: bold; background: #fef08a; padding: 4px 8px; border-radius: 4px; }}
+        </style></head><body>
+        <h1>🎯 Alertas de Valor (Target Price)</h1>
+        
+        <div class="cards">
+            <div class="card" style="border-top-color: {wr_color};"><h3>Win Rate</h3><div class="val" style="color:{wr_color};">{win_rate:.1f}%</div></div>
+            <div class="card" style="border-top-color: {units_color};"><h3>Unidades</h3><div class="val" style="color:{units_color};">{units:+.2f} u</div></div>
+            <div class="card" style="border-top-color: #16a34a;"><h3>Ganadas</h3><div class="val" style="color:#16a34a;">{won}</div></div>
+            <div class="card" style="border-top-color: #dc2626;"><h3>Perdidas</h3><div class="val" style="color:#dc2626;">{lost}</div></div>
+            <div class="card" style="border-top-color: #ca8a04;"><h3>Pendientes</h3><div class="val" style="color:#ca8a04;">{pending}</div></div>
+        </div>
+
+        <table><tr><th>ID</th><th>Partido</th><th>Regla</th><th>Pregame</th><th>Target</th><th>Señal</th><th>Línea Alerta</th><th>Cuota</th><th>Final</th><th>Status</th></tr>
+        """
+        
+        if not alerts:
+            html += "<tr><td colspan='10' style='padding:20px;'>No hay alertas guardadas aún.</td></tr>"
+        else:
+            for a in alerts:
+                css = "won" if a[11]=="WON" else "lost" if a[11]=="LOST" else "pending"
+                html += f"<tr><td>#{a[0]}</td><td style='text-align:left;'>{a[2]}</td><td>R{a[3]}</td><td>{a[5]}</td><td>{a[7]:.1f}</td><td><b>{a[8]}</b></td><td>{a[9]:.1f}</td><td>@{a[10]:.2f}</td><td>{a[12] if a[12] else '-'}</td><td><span class='{css}'>{a[11]}</span></td></tr>"
+        html += "</table></body></html>"
+        return html
+    except Exception as e:
+        return f"<h1>Error al cargar el dashboard</h1><p>{e}</p>"
+
+@app.get("/health")
+@app.head("/health")
+def health_check(): 
+    return {"status": "ok"}
+
+# ==========================================
+# ARRANQUE DEL BOT
+# ==========================================
+@app.on_event("startup")
+def startup_event():
+    init_db()
+    scheduler = BackgroundScheduler(timezone="UTC")
+    
+    # Job 1: Recolector (cada 10 min)
+    scheduler.add_job(job_recolector, "interval", minutes=10)
+    
+    # Job 2: Escáner de reglas (cada 60 segundos)
+    scheduler.add_job(job_escaner, "interval", seconds=60)
+    
+    # Job 3: Auditor de resultados (cada 5 min)
+    scheduler.add_job(job_auditor, "interval", minutes=5)
+    
+    scheduler.start()
+    print("🚀 Bot iniciado. Jobs activos: Recolector (10m), Escáner (60s), Auditor (5m).")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
