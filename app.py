@@ -136,10 +136,8 @@ def get_team_key(name):
     return n
 
 def get_matchup_key(team_a, team_b):
-    # Ordena alfabéticamente para que no importe quién es local/visitante
     t1, t2 = get_team_key(team_a), get_team_key(team_b)
     return "_vs_".join(sorted([t1, t2]))
-
 
 # ==========================================
 # UTILIDADES
@@ -219,7 +217,7 @@ def job_recolector():
 
         home = ev.get("home_team", {}).get("name", "")
         away = ev.get("away_team", {}).get("name", "")
-        matchup = get_matchup_key(away, home) # Llave ordenada
+        matchup = get_matchup_key(away, home)
 
         try:
             r2 = session.get(f"https://api.infersports.dev/v1/events/{ev['id']}/odds", headers=headers, params={"format": "decimal"}, timeout=15)
@@ -238,13 +236,11 @@ def job_recolector():
                 log.info("Pregame Guardado %s -> %s", matchup, linea)
                 break
 
-
 # ==========================================
 # JOB 2: ESCÁNER + REGLAS
 # ==========================================
 def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln):
-    if proy == pregame:
-        return
+    if proy == pregame: return
 
     if regla == 1:
         decision = "UNDER" if proy > pregame else "OVER"
@@ -257,9 +253,6 @@ def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln
 
     cuota = ln["under"] if decision == "UNDER" else ln["over"]
     
-    # Filtro extra de cuota si lo deseas
-    # if cuota < 1.80: return
-
     cur = con.execute("""
         INSERT OR IGNORE INTO alertas
         (event_id, matchup, regla, checkpoint, pregame_line, proyeccion, target_line,
@@ -281,9 +274,6 @@ def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln
         )
         if enviar_telegram(msg):
             log.info("✅ Alerta #%s R%s enviada", alert_id, regla)
-        else:
-            log.warning("⚠️ Alerta #%s guardada, pero Telegram falló", alert_id)
-
 
 def job_escaner():
     if not INFER_API_KEY: return
@@ -294,9 +284,13 @@ def job_escaner():
     except requests.RequestException as e: return
 
     games = [g for ev in r.json().get("events", []) if (g := parse_espn_game(ev))]
+    en_vivo = [g for g in games if g["state"] == "in"]
+    
+    # LOG DE DIAGNÓSTICO
+    log.info(f"ESPN devolvió {len(games)} partidos. En vivo ahora mismo: {len(en_vivo)}")
+
     validos = []
-    for g in games:
-        if g["state"] != "in": continue
+    for g in en_vivo:
         if g["period"] not in (3, 4): continue
         if g["period"] == 4:
             secs = clock_to_seconds(g["clock"])
@@ -304,9 +298,10 @@ def job_escaner():
         validos.append(g)
 
     if not validos:
+        log.info("No hay partidos en Q3/Q4 (o faltan < 2 mins). Esperando...")
         return
         
-    log.info(f"Escaneando {len(validos)} partidos en Q3/Q4...")
+    log.info(f"Escaneando {len(validos)} partidos en ventana válida...")
 
     headers = {"Authorization": f"Bearer {INFER_API_KEY}"}
     try:
@@ -317,7 +312,7 @@ def job_escaner():
     need = {g["matchup"] for g in validos}
     live_odds = {}
     for ev in r_live.json().get("data", []):
-        key = get_matchup_key(ev['away_team']['name'], ev['home_team']['name']) # Llave ordenada
+        key = get_matchup_key(ev['away_team']['name'], ev['home_team']['name'])
         if key not in need: continue
         try:
             r2 = session.get(f"https://api.infersports.dev/v1/events/{ev['id']}/odds", headers=headers, params={"format": "decimal"}, timeout=15)
@@ -345,23 +340,22 @@ def job_escaner():
             pre_row = con.execute("SELECT line FROM pregame_lines WHERE matchup=? ORDER BY updated_at DESC LIMIT 1", (g["matchup"],)).fetchone()
             pregame = float(pre_row[0]) if pre_row else 0.0
 
-            # Log de diagnóstico
             log.info(f"[{g['matchup']}] P{g['period']} {g['clock']} | Vivo: {vivo} | Pregame: {pregame if pre_row else 'N/A'}")
 
-            # Regla 1 (Requiere Pregame)
+            # Regla 1
             if g["period"] == 4 and pre_row:
                 t3 = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
                 proy = t3 * 1.25
                 _evaluar_y_alerta(con, g, 1, "Q4", pregame, proy, proy, vivo, ln)
 
-            # Regla 2 (Requiere Pregame)
+            # Regla 2
             if g["period"] in (3, 4) and pre_row:
                 ht = sum(g["q_h"][:2]) + sum(g["q_a"][:2])
                 proy = ht * 2
                 chk = "Q3" if g["period"] == 3 else "Q4"
                 _evaluar_y_alerta(con, g, 2, chk, pregame, proy, pregame, vivo, ln)
 
-            # Regla 3 (NO REQUIERE PREGAME)
+            # Regla 3
             if g["period"] == 4 or (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0")):
                 t3_sum = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
                 if t3_sum > 0:
@@ -400,7 +394,6 @@ def job_escaner():
                         log.info(f"[EMPATE] {g['matchup']} R3 -> Proyección igual a línea viva ({vivo}).")
                 else:
                     log.info(f"[SIN DATOS] {g['matchup']} R3 -> La suma de Q1+Q2+Q3 es 0.")
-
 
 # ==========================================
 # JOB 3: AUDITOR
@@ -544,14 +537,6 @@ def health_check():
     return {"status": "ok"}
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("app:app", host="0.0.0.0", port=port)
-
-
-# ==========================================
-# ARRANQUE LOCAL
-# ==========================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
