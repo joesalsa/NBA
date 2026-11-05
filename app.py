@@ -259,10 +259,6 @@ def job_recolector():
 # JOB 2: ESCÁNER + REGLAS (cada 60s)
 # ==========================================
 def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln):
-    """
-    regla 1: proy > pre → UNDER | proy < pre → OVER | target = proy | filtro: UNDER si vivo>=proy
-    regla 2: proy > pre → OVER  | proy < pre → UNDER| target = pre  | filtro: OVER  si vivo<=pre
-    """
     if proy == pregame:
         return
 
@@ -318,9 +314,6 @@ def job_escaner():
     games = [g for ev in r.json().get("events", []) if (g := parse_espn_game(ev))]
 
     # 2. Filtrar ventana válida
-    #    Regla 1: Q4 (state=in, period=4, clock >= 2:00)
-    #    Regla 2: Q3 o Q4 (state=in, period in {3,4}, clock >= 2:00 si Q4)
-    #    OT (period>=5) y Final descartados
     validos = []
     for g in games:
         if g["state"] != "in":
@@ -329,7 +322,7 @@ def job_escaner():
             continue
         if g["period"] == 4:
             secs = clock_to_seconds(g["clock"])
-            if secs is None or secs < 120:   # corte < 2:00
+            if secs is None or secs < 120:
                 continue
         validos.append(g)
 
@@ -401,6 +394,43 @@ def job_escaner():
                 proy = ht * 2
                 chk = "Q3" if g["period"] == 3 else "Q4"
                 _evaluar_y_alerta(con, g, 2, chk, pregame, proy, pregame, vivo, ln)
+
+            # Regla 3: SOLO al finalizar el Q3 (o al empezar el Q4)
+            # Calculamos la proyección: (Q1 + Q2 + Q3) * 1.25 + 6
+            if g["period"] == 4 or (g["period"] == 3 and clock_to_seconds(g["clock"]) == 0):
+                t3_sum = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
+                if t3_sum > 0: # Verificar que hay datos
+                    proy_r3 = (t3_sum * 1.25) + 6
+                    
+                    if proy_r3 > vivo:
+                        decision = "OVER"
+                    elif proy_r3 < vivo:
+                        decision = "UNDER"
+                    else:
+                        decision = None
+                        
+                    if decision:
+                        cuota = ln["under"] if decision == "UNDER" else ln["over"]
+                        cur = con.execute("""
+                            INSERT OR IGNORE INTO alertas
+                            (event_id, matchup, regla, checkpoint, pregame_line, proyeccion, target_line,
+                             decision, live_line_at_alert, cuota, created_at)
+                            VALUES (?, ?, 3, 'EndQ3', ?, ?, ?, ?, ?, ?, ?)
+                        """, (g["id"], g["matchup"], pregame, proy_r3, vivo,
+                              decision, vivo, cuota, datetime.now(timezone.utc).isoformat()))
+                        
+                        if cur.rowcount > 0:
+                            alert_id = cur.lastrowid
+                            msg = (
+                                f"🚨 <b>ALERTA #{alert_id} (Regla 3 - Fin Q3)</b>\n\n"
+                                f"🏀 {html.escape(g['matchup'])}\n"
+                                f"📌 Pregame: {pregame}\n"
+                                f"📈 Proy Q3 (+6): {proy_r3:.1f}\n"
+                                f"🎯 Target: {vivo}\n"
+                                f"💡 <b>{decision} {vivo}</b> @{cuota:.2f}"
+                            )
+                            if enviar_telegram(msg):
+                                log.info("Alerta #%s R3: %s %s @%.2f", alert_id, decision, vivo, cuota)
 
 
 # ==========================================
