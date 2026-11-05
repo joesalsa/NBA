@@ -35,7 +35,7 @@ scheduler = BackgroundScheduler(timezone="UTC")
 
 
 # ==========================================
-# LIFESPAN (debe ir ANTES de los @app.get)
+# LIFESPAN
 # ==========================================
 @asynccontextmanager
 async def lifespan(app):
@@ -55,7 +55,6 @@ async def lifespan(app):
         session.close()
         log.info("Bot detenido.")
 
-
 app = FastAPI(lifespan=lifespan)
 
 
@@ -70,7 +69,6 @@ def db():
         con.commit()
     finally:
         con.close()
-
 
 def init_db():
     with db() as con:
@@ -145,14 +143,12 @@ def get_team_key(name):
 # UTILIDADES
 # ==========================================
 def clock_to_seconds(clock_str):
-    """Convierte 'MM:SS' a segundos. Devuelve None si no parsea."""
     if not clock_str:
         return None
     m = re.match(r"(\d+):(\d+)", clock_str.strip())
     if not m:
         return None
     return int(m.group(1)) * 60 + int(m.group(2))
-
 
 def enviar_telegram(msg):
     try:
@@ -169,7 +165,6 @@ def enviar_telegram(msg):
         log.warning("Telegram error: %s", e)
         return False
 
-
 def parse_espn_game(ev):
     comp = ev.get("competitions", [{}])[0]
     cs = comp.get("competitors", [])
@@ -177,14 +172,18 @@ def parse_espn_game(ev):
         return None
     home = next((c for c in cs if c.get("homeAway") == "home"), cs[0])
     away = next((c for c in cs if c.get("homeAway") == "away"), cs[1])
+    
+    home_name = home.get("team", {}).get("displayName", "")
+    away_name = away.get("team", {}).get("displayName", "")
+    
     q_h = [int(q.get("value") or 0) for q in home.get("linescores", [])]
     q_a = [int(q.get("value") or 0) for q in away.get("linescores", [])]
     st = ev.get("status", {})
     return {
         "id": ev.get("id"),
-        "matchup": f"{get_team_key(away.get('team', {}).get('displayName', ''))}"
-                   f"_vs_{get_team_key(home.get('team', {}).get('displayName', ''))}",
-        "state": st.get("type", {}).get("state", ""),   # pre / in / post
+        "matchup": f"{get_team_key(away_name)}_vs_{get_team_key(home_name)}",
+        "display_name": f"{away_name} vs {home_name}",  # Nombre real para Telegram
+        "state": st.get("type", {}).get("state", ""),
         "period": int(st.get("period") or 0),
         "clock": st.get("displayClock", "") or "",
         "q_h": q_h,
@@ -193,7 +192,7 @@ def parse_espn_game(ev):
 
 
 # ==========================================
-# JOB 1: RECOLECTOR PREGAME (cada 10 min)
+# JOB 1: RECOLECTOR PREGAME
 # ==========================================
 def job_recolector():
     if not INFER_API_KEY:
@@ -256,7 +255,7 @@ def job_recolector():
 
 
 # ==========================================
-# JOB 2: ESCÁNER + REGLAS (cada 60s)
+# JOB 2: ESCÁNER + REGLAS
 # ==========================================
 def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln):
     if proy == pregame:
@@ -282,83 +281,61 @@ def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln
 
     if cur.rowcount > 0:
         alert_id = cur.lastrowid
+        flecha = "⬆️" if decision == "OVER" else "⬇️"
         msg = (
             f"🚨 <b>ALERTA #{alert_id} (Regla {regla})</b>\n\n"
-            f"🏀 {html.escape(g['matchup'])}\n"
-            f"📌 Pregame: {pregame}\n"
-            f"📈 Proyección: {proy:.1f}\n"
-            f"🎯 Target: {target:.1f}\n"
-            f"💡 <b>{decision} {vivo}</b> @{cuota:.2f}"
+            f"🏀 {g.get('display_name', g['matchup'])}\n"
+            f"⏱️ Estado: P{g['period']} ({g['clock']})\n\n"
+            f"📌 Línea en vivo: {vivo}\n"
+            f"🪙 Cuota {decision.capitalize()}: @{cuota:.2f}\n\n"
+            f"💡 Recomendación: {flecha} <b>{decision} {vivo}</b>"
         )
         if enviar_telegram(msg):
             log.info("Alerta #%s R%s: %s %s @%.2f", alert_id, regla, decision, vivo, cuota)
-        else:
-            log.warning("Alerta #%s R%s guardada, pero Telegram falló", alert_id, regla)
 
 
 def job_escaner():
     if not INFER_API_KEY:
         return
 
-    # 1. ESPN scoreboard
     try:
-        r = session.get(
-            "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
-            timeout=15,
-        )
+        r = session.get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", timeout=15)
         r.raise_for_status()
     except requests.RequestException as e:
-        log.warning("Escáner ESPN: %s", e)
         return
 
     games = [g for ev in r.json().get("events", []) if (g := parse_espn_game(ev))]
-
-    # 2. Filtrar ventana válida
     validos = []
     for g in games:
-        if g["state"] != "in":
-            continue
-        if g["period"] not in (3, 4):
-            continue
+        if g["state"] != "in": continue
+        if g["period"] not in (3, 4): continue
         if g["period"] == 4:
             secs = clock_to_seconds(g["clock"])
-            if secs is None or secs < 120:
-                continue
+            if secs is None or secs < 120: continue
         validos.append(g)
 
     if not validos:
         return
 
-    # 3. Líneas en vivo (solo si hay partidos válidos)
     headers = {"Authorization": f"Bearer {INFER_API_KEY}"}
     try:
         r_live = session.get("https://api.infersports.dev/v1/events/live", headers=headers, timeout=15)
-        if r_live.status_code != 200:
-            return
-    except requests.RequestException as e:
-        log.warning("Escáner live: %s", e)
+        if r_live.status_code != 200: return
+    except requests.RequestException:
         return
 
     need = {g["matchup"] for g in validos}
     live_odds = {}
     for ev in r_live.json().get("data", []):
-        key = (f"{get_team_key(ev['away_team']['name'])}"
-               f"_vs_{get_team_key(ev['home_team']['name'])}")
-        if key not in need:
-            continue
+        key = f"{get_team_key(ev['away_team']['name'])}_vs_{get_team_key(ev['home_team']['name'])}"
+        if key not in need: continue
         try:
-            r2 = session.get(
-                f"https://api.infersports.dev/v1/events/{ev['id']}/odds",
-                headers=headers, params={"format": "decimal"}, timeout=15,
-            )
-            if r2.status_code != 200:
-                continue
+            r2 = session.get(f"https://api.infersports.dev/v1/events/{ev['id']}/odds", headers=headers, params={"format": "decimal"}, timeout=15)
+            if r2.status_code != 200: continue
         except requests.RequestException:
             continue
         for odd in r2.json().get("odds", []):
-            if (odd.get("market_type") == "totals"
-                    and odd.get("period") == "full_time"
-                    and odd.get("status") == "open"):
+            if (odd.get("market_type") == "totals" and odd.get("period") == "full_time" and odd.get("status") == "open"):
                 prices = odd.get("prices", {})
                 live_odds[key] = {
                     "line": float(odd["line"]),
@@ -367,18 +344,13 @@ def job_escaner():
                 }
                 break
 
-    # 4. Aplicar reglas
     for g in validos:
         ln = live_odds.get(g["matchup"])
-        if not ln:
-            continue
+        if not ln: continue
+        
         with db() as con:
-            pre_row = con.execute(
-                "SELECT line FROM pregame_lines WHERE matchup=? ORDER BY updated_at DESC LIMIT 1",
-                (g["matchup"],),
-            ).fetchone()
-            if not pre_row:
-                continue
+            pre_row = con.execute("SELECT line FROM pregame_lines WHERE matchup=? ORDER BY updated_at DESC LIMIT 1", (g["matchup"],)).fetchone()
+            if not pre_row: continue
             pregame = float(pre_row[0])
             vivo = ln["line"]
 
@@ -396,10 +368,9 @@ def job_escaner():
                 _evaluar_y_alerta(con, g, 2, chk, pregame, proy, pregame, vivo, ln)
 
             # Regla 3: SOLO al finalizar el Q3 (o al empezar el Q4)
-            # Calculamos la proyección: (Q1 + Q2 + Q3) * 1.25 + 6
             if g["period"] == 4 or (g["period"] == 3 and clock_to_seconds(g["clock"]) == 0):
                 t3_sum = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
-                if t3_sum > 0: # Verificar que hay datos
+                if t3_sum > 0:
                     proy_r3 = (t3_sum * 1.25) + 6
                     
                     if proy_r3 > vivo:
@@ -421,61 +392,78 @@ def job_escaner():
                         
                         if cur.rowcount > 0:
                             alert_id = cur.lastrowid
+                            flecha = "⬆️" if decision == "OVER" else "⬇️"
                             msg = (
-                                f"🚨 <b>ALERTA #{alert_id} (Regla 3 - Fin Q3)</b>\n\n"
-                                f"🏀 {html.escape(g['matchup'])}\n"
-                                f"📌 Pregame: {pregame}\n"
-                                f"📈 Proy Q3 (+6): {proy_r3:.1f}\n"
-                                f"🎯 Target: {vivo}\n"
-                                f"💡 <b>{decision} {vivo}</b> @{cuota:.2f}"
+                                f"🚨 <b>ALERTA (Regla 3 - Fin Q3)</b>\n\n"
+                                f"🏀 {g.get('display_name', g['matchup'])}\n"
+                                f"⏱️ Estado: P{g['period']} ({g['clock']})\n\n"
+                                f"📌 Línea en vivo: {vivo}\n"
+                                f"🪙 Cuota {decision.capitalize()}: @{cuota:.2f}\n\n"
+                                f"💡 Recomendación: {flecha} <b>{decision} {vivo}</b>"
                             )
                             if enviar_telegram(msg):
                                 log.info("Alerta #%s R3: %s %s @%.2f", alert_id, decision, vivo, cuota)
 
 
 # ==========================================
-# JOB 3: AUDITOR (cada 5 min)
+# JOB 3: AUDITOR (Envía mensaje al terminar)
 # ==========================================
 def job_auditor():
     try:
         with db() as con:
             pendientes = con.execute(
-                "SELECT id, event_id, decision, target_line FROM alertas WHERE status='PENDING'"
+                "SELECT id, event_id, matchup, decision, target_line, cuota FROM alertas WHERE status='PENDING'"
             ).fetchall()
         if not pendientes:
             return
 
-        r = session.get(
-            "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
-            timeout=15,
-        )
+        r = session.get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", timeout=15)
         r.raise_for_status()
         games = {ev.get("id"): ev for ev in r.json().get("events", [])}
 
         updates = []
-        for alert_id, event_id, decision, target in pendientes:
-            g = games.get(event_id)
-            if not g:
-                continue
-            if g.get("status", {}).get("type", {}).get("state") != "post":
-                continue
-            comp = g.get("competitions", [{}])[0]
+        resolved_alerts = []
+        
+        for alert_id, event_id, matchup, decision, target, cuota in pendientes:
+            g_raw = games.get(event_id)
+            if not g_raw: continue
+            if g_raw.get("status", {}).get("type", {}).get("state") != "post": continue
+            
+            g = parse_espn_game(g_raw)
+            display_name = g.get("display_name", matchup) if g else matchup.replace("_vs_", " vs ")
+            
+            comp = g_raw.get("competitions", [{}])[0]
             final_total = sum(int(c.get("score") or 0) for c in comp.get("competitors", []))
 
-            if final_total == target:
-                status = "PUSH"
-            elif decision == "OVER":
-                status = "WON" if final_total > target else "LOST"
-            else:
-                status = "WON" if final_total < target else "LOST"
+            if final_total == target: status = "PUSH"
+            elif decision == "OVER": status = "WON" if final_total > target else "LOST"
+            else: status = "WON" if final_total < target else "LOST"
+            
             updates.append((status, final_total, alert_id))
+            resolved_alerts.append((display_name, decision, target, cuota, status, final_total))
 
         if updates:
             with db() as con:
                 for u in updates:
                     con.execute("UPDATE alertas SET status=?, final_total=? WHERE id=?", u)
-            for status, final_total, alert_id in updates:
-                log.info("Auditor #%s: %s (final=%s)", alert_id, status, final_total)
+            
+            # ENVIAR RESULTADO A TELEGRAM
+            for display_name, decision, target, cuota, status, final_total in resolved_alerts:
+                log.info("Auditor: %s -> %s (Final: %s)", display_name, status, final_total)
+                
+                if status == "WON": res_txt = "✅ <b>GANADA</b>"
+                elif status == "LOST": res_txt = "❌ <b>PERDIDA</b>"
+                else: res_txt = "⚪ <b>PUSH (Empate)</b>"
+                
+                msg = (
+                    f"🏁 <b>RESULTADO DE APUESTA</b>\n\n"
+                    f"🏀 {display_name}\n"
+                    f"💡 Apuesta: {decision} {target} @{cuota:.2f}\n"
+                    f"📊 Total Final: {final_total}\n\n"
+                    f"🏆 Resultado: {res_txt}"
+                )
+                enviar_telegram(msg)
+                
     except Exception as e:
         log.exception("Auditor error: %s", e)
 
@@ -493,7 +481,6 @@ def dashboard():
                 FROM alertas ORDER BY id DESC
             """).fetchall()
     except Exception as e:
-        log.exception("Dashboard error")
         return HTMLResponse(f"<h1>Error</h1><p>{html.escape(str(e))}</p>", status_code=500)
 
     won     = sum(1 for r in rows if r[8] == "WON")
