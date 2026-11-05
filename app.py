@@ -35,6 +35,31 @@ scheduler = BackgroundScheduler(timezone="UTC")
 
 
 # ==========================================
+# LIFESPAN (debe ir ANTES de los @app.get)
+# ==========================================
+@asynccontextmanager
+async def lifespan(app):
+    missing = [k for k, v in REQUIRED.items() if not v]
+    if missing:
+        raise RuntimeError(f"Faltan variables de entorno: {missing}")
+    init_db()
+    scheduler.add_job(job_recolector, "interval", minutes=10, id="recolector", coalesce=True, max_instances=1)
+    scheduler.add_job(job_escaner,    "interval", seconds=60, id="escaner",    coalesce=True, max_instances=1)
+    scheduler.add_job(job_auditor,    "interval", minutes=5,  id="auditor",    coalesce=True, max_instances=1)
+    scheduler.start()
+    log.info("Bot iniciado: Recolector 10m, Escáner 60s, Auditor 5m.")
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
+        session.close()
+        log.info("Bot detenido.")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+# ==========================================
 # BASE DE DATOS
 # ==========================================
 @contextmanager
@@ -441,7 +466,6 @@ def dashboard():
         log.exception("Dashboard error")
         return HTMLResponse(f"<h1>Error</h1><p>{html.escape(str(e))}</p>", status_code=500)
 
-    total   = len(rows)
     won     = sum(1 for r in rows if r[8] == "WON")
     lost    = sum(1 for r in rows if r[8] == "LOST")
     push    = sum(1 for r in rows if r[8] == "PUSH")
@@ -510,30 +534,8 @@ def health_check():
 
 
 # ==========================================
-# LIFESPAN
+# ARRANQUE LOCAL
 # ==========================================
-@asynccontextmanager
-async def lifespan(app):
-    missing = [k for k, v in REQUIRED.items() if not v]
-    if missing:
-        raise RuntimeError(f"Faltan variables de entorno: {missing}")
-    init_db()
-    scheduler.add_job(job_recolector, "interval", minutes=10, id="recolector", coalesce=True, max_instances=1)
-    scheduler.add_job(job_escaner,    "interval", seconds=60, id="escaner",    coalesce=True, max_instances=1)
-    scheduler.add_job(job_auditor,    "interval", minutes=5,  id="auditor",    coalesce=True, max_instances=1)
-    scheduler.start()
-    log.info("Bot iniciado: Recolector 10m, Escáner 60s, Auditor 5m.")
-    try:
-        yield
-    finally:
-        scheduler.shutdown(wait=False)
-        session.close()
-        log.info("Bot detenido.")
-
-
-app = FastAPI(lifespan=lifespan)
-
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
