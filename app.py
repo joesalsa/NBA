@@ -287,7 +287,6 @@ def job_escaner():
         log.warning("⚠️ [ESCÁNER] Falta INFER_API_KEY.")
         return
 
-    # Usamos el subdominio .web para evitar el bloqueo 403 de ESPN
     url_espn = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
     try:
         r = session.get(url_espn, timeout=15)
@@ -373,8 +372,11 @@ def job_escaner():
                 chk = "Q3" if g["period"] == 3 else "Q4"
                 _evaluar_y_alerta(con, g, 2, chk, pregame, proy, pregame, vivo, ln)
 
-            # Regla 3
-            if g["period"] == 4 or (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0")):
+            # Regla 3: Solo al final exacto del Q3 o en el primer minuto del Q4
+            is_end_q3 = (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
+            is_start_q4 = (g["period"] == 4 and (clock_to_seconds(g["clock"]) or 0) >= 660) # 660 segs = 11:00
+            
+            if is_end_q3 or is_start_q4:
                 t3_sum = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
                 if t3_sum > 0:
                     proy_r3 = (t3_sum * 1.25) + 6
