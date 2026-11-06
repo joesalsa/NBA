@@ -29,8 +29,15 @@ REQUIRED = {
     "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
 }
 
+# ==========================================
+# SESIÓN CON USER-AGENT DE NAVEGADOR REAL
+# ==========================================
 session = requests.Session()
-session.headers.update({"User-Agent": "value-bot/2.0"})
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+})
 scheduler = BackgroundScheduler(timezone="UTC")
 
 # ==========================================
@@ -280,8 +287,10 @@ def job_escaner():
         log.warning("⚠️ [ESCÁNER] Falta INFER_API_KEY.")
         return
 
+    # Usamos el subdominio .web para evitar el bloqueo 403 de ESPN
+    url_espn = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
     try:
-        r = session.get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", timeout=15)
+        r = session.get(url_espn, timeout=15)
         r.raise_for_status()
     except requests.RequestException as e: 
         log.error(f"❌ [ESCÁNER] Error al conectar con ESPN: {e}")
@@ -294,7 +303,6 @@ def job_escaner():
 
     validos = []
     for g in en_vivo:
-        # Un partido es válido si está en Q3 (al final) o en Q4
         if g["period"] not in (3, 4): continue
         if g["period"] == 4:
             secs = clock_to_seconds(g["clock"])
@@ -417,7 +425,8 @@ def job_auditor():
             ).fetchall()
         if not pendientes: return
 
-        r = session.get("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", timeout=15)
+        url_espn = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+        r = session.get(url_espn, timeout=15)
         r.raise_for_status()
         games = {ev.get("id"): ev for ev in r.json().get("events", [])}
 
