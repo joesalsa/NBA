@@ -302,11 +302,12 @@ def job_escaner():
 
     validos = []
     for g in en_vivo:
-        # AHORA INCLUIMOS EL HT (period == 2) y Q3/Q4
-        is_ht = (g["period"] == 2 and g["clock"] in ["0:00", "0.0"])
+        # Solo HT (period 2, 0:00), Q3 y Q4 son válidos
+        is_ht_exact = (g["period"] == 2 and g["clock"] in ["0:00", "0.0"])
         is_q3_q4 = g["period"] in (3, 4)
         
-        if not (is_ht or is_q3_q4): continue
+        if not (is_ht_exact or is_q3_q4): 
+            continue
         
         if g["period"] == 4:
             secs = clock_to_seconds(g["clock"])
@@ -370,12 +371,12 @@ def job_escaner():
                 proy = t3 * 1.25
                 _evaluar_y_alerta(con, g, 1, "Q4", pregame, proy, proy, vivo, ln)
 
-            # Regla 2 (HT o Q3)
-            if (g["period"] == 2 or g["period"] == 3) and pre_row:
+            # Regla 2 (SOLO AL FINALIZAR EL 2DO CUARTO - HT EXACTO)
+            is_ht_exact = (g["period"] == 2 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
+            if is_ht_exact and pre_row:
                 ht = sum(g["q_h"][:2]) + sum(g["q_a"][:2])
                 proy = ht * 2
-                chk = "HT" if g["period"] == 2 else "Q3"
-                _evaluar_y_alerta(con, g, 2, chk, pregame, proy, pregame, vivo, ln)
+                _evaluar_y_alerta(con, g, 2, "HT", pregame, proy, pregame, vivo, ln)
 
             # Regla 3 (Solo al final exacto del Q3 o en el primer minuto del Q4)
             is_end_q3 = (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
