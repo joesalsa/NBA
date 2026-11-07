@@ -302,7 +302,12 @@ def job_escaner():
 
     validos = []
     for g in en_vivo:
-        if g["period"] not in (3, 4): continue
+        # AHORA INCLUIMOS EL HT (period == 2) y Q3/Q4
+        is_ht = (g["period"] == 2 and g["clock"] in ["0:00", "0.0"])
+        is_q3_q4 = g["period"] in (3, 4)
+        
+        if not (is_ht or is_q3_q4): continue
+        
         if g["period"] == 4:
             secs = clock_to_seconds(g["clock"])
             if secs is None or secs < 120: 
@@ -311,7 +316,7 @@ def job_escaner():
         validos.append(g)
 
     if not validos:
-        log.info("💤 [ESCÁNER] No hay partidos en Q3/Q4 con tiempo suficiente. Esperando...")
+        log.info("💤 [ESCÁNER] No hay partidos en HT o Q3/Q4 con tiempo suficiente. Esperando...")
         return
         
     log.info(f"🔍 [ESCÁNER] Evaluando {len(validos)} partidos en ventana válida...")
@@ -359,20 +364,20 @@ def job_escaner():
 
             log.info(f"⚙️ [EVALUANDO] {g['matchup']} | P{g['period']} {g['clock']} | Vivo: {vivo} | Pregame: {pregame if pre_row else 'N/A'}")
 
-            # Regla 1
+            # Regla 1 (Solo Q4)
             if g["period"] == 4 and pre_row:
                 t3 = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
                 proy = t3 * 1.25
                 _evaluar_y_alerta(con, g, 1, "Q4", pregame, proy, proy, vivo, ln)
 
-            # Regla 2
-            if g["period"] in (3, 4) and pre_row:
+            # Regla 2 (HT o Q3)
+            if (g["period"] == 2 or g["period"] == 3) and pre_row:
                 ht = sum(g["q_h"][:2]) + sum(g["q_a"][:2])
                 proy = ht * 2
-                chk = "Q3" if g["period"] == 3 else "Q4"
+                chk = "HT" if g["period"] == 2 else "Q3"
                 _evaluar_y_alerta(con, g, 2, chk, pregame, proy, pregame, vivo, ln)
 
-            # Regla 3: Solo al final exacto del Q3 o en el primer minuto del Q4
+            # Regla 3 (Solo al final exacto del Q3 o en el primer minuto del Q4)
             is_end_q3 = (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
             is_start_q4 = (g["period"] == 4 and (clock_to_seconds(g["clock"]) or 0) >= 660) # 660 segs = 11:00
             
@@ -383,13 +388,12 @@ def job_escaner():
                     log.info(f"🧮 [REGLA 3] {g['matchup']} | Proy: {proy_r3:.1f} vs Pregame: {pregame}")
                     
                     decision = None
-                    # Dirección: proy vs pregame
                     if proy_r3 > pregame:
                         decision = "OVER"
-                        if vivo > pregame: decision = None # Filtro de valor: vivo debe ser <= pregame
+                        if vivo > pregame: decision = None
                     elif proy_r3 < pregame:
                         decision = "UNDER"
-                        if vivo < pregame: decision = None # Filtro de valor: vivo debe ser >= pregame
+                        if vivo < pregame: decision = None
                         
                     if decision:
                         cuota = ln["under"] if decision == "UNDER" else ln["over"]
@@ -398,7 +402,7 @@ def job_escaner():
                             (event_id, matchup, regla, checkpoint, pregame_line, proyeccion, target_line,
                              decision, live_line_at_alert, cuota, created_at)
                             VALUES (?, ?, 3, 'EndQ3', ?, ?, ?, ?, ?, ?, ?)
-                        """, (g["id"], g["matchup"], pregame, proy_r3, pregame, # <--- Target ahora es pregame
+                        """, (g["id"], g["matchup"], pregame, proy_r3, pregame,
                               decision, vivo, cuota, datetime.now(timezone.utc).isoformat()))
                         
                         if cur.rowcount > 0:
