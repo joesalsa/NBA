@@ -190,6 +190,7 @@ def parse_espn_game(ev):
         "matchup": get_matchup_key(away_name, home_name),
         "display_name": f"{away_name} vs {home_name}",
         "state": st.get("type", {}).get("state", ""),
+        "desc": st.get("type", {}).get("description", ""), # <-- AGREGADO PARA HT
         "period": int(st.get("period") or 0),
         "clock": st.get("displayClock", "") or "",
         "q_h": q_h,
@@ -309,7 +310,8 @@ def job_escaner():
 
     validos = []
     for g in en_vivo:
-        is_ht_exact = (g["period"] == 2 and g["clock"] in ["0:00", "0.0"])
+        # Ahora detectamos el HT por la descripción, sin importar el reloj
+        is_ht_exact = ("Halftime" in g["desc"]) or (g["period"] == 2 and g["clock"] in ["0:00", "0.0", "00:00", ""])
         is_q3_q4 = g["period"] in (3, 4)
         
         if not (is_ht_exact or is_q3_q4): 
@@ -378,7 +380,7 @@ def job_escaner():
                 _evaluar_y_alerta(con, g, 1, "Q4", pregame, proy, proy, vivo, ln)
 
             # Regla 2 (SOLO AL FINALIZAR EL 2DO CUARTO - HT EXACTO)
-            is_ht_exact = (g["period"] == 2 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
+            is_ht_exact = ("Halftime" in g["desc"]) or (g["period"] == 2 and (g["clock"] in ["0:00", "0.0", "00:00", ""]))
             if is_ht_exact and pre_row:
                 ht = sum(g["q_h"][:2]) + sum(g["q_a"][:2])
                 proy = ht * 2
@@ -581,4 +583,3 @@ def health_check():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-    
