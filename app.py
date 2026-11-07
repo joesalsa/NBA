@@ -376,15 +376,20 @@ def job_escaner():
             is_end_q3 = (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
             is_start_q4 = (g["period"] == 4 and (clock_to_seconds(g["clock"]) or 0) >= 660) # 660 segs = 11:00
             
-            if is_end_q3 or is_start_q4:
+            if (is_end_q3 or is_start_q4) and pre_row:
                 t3_sum = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
                 if t3_sum > 0:
                     proy_r3 = (t3_sum * 1.25) + 6
-                    log.info(f"🧮 [REGLA 3] {g['matchup']} | Proy: {proy_r3:.1f} vs Vivo: {vivo}")
+                    log.info(f"🧮 [REGLA 3] {g['matchup']} | Proy: {proy_r3:.1f} vs Pregame: {pregame}")
                     
-                    if proy_r3 > vivo: decision = "OVER"
-                    elif proy_r3 < vivo: decision = "UNDER"
-                    else: decision = None
+                    decision = None
+                    # Dirección: proy vs pregame
+                    if proy_r3 > pregame:
+                        decision = "OVER"
+                        if vivo > pregame: decision = None # Filtro de valor: vivo debe ser <= pregame
+                    elif proy_r3 < pregame:
+                        decision = "UNDER"
+                        if vivo < pregame: decision = None # Filtro de valor: vivo debe ser >= pregame
                         
                     if decision:
                         cuota = ln["under"] if decision == "UNDER" else ln["over"]
@@ -393,7 +398,7 @@ def job_escaner():
                             (event_id, matchup, regla, checkpoint, pregame_line, proyeccion, target_line,
                              decision, live_line_at_alert, cuota, created_at)
                             VALUES (?, ?, 3, 'EndQ3', ?, ?, ?, ?, ?, ?, ?)
-                        """, (g["id"], g["matchup"], pregame, proy_r3, vivo,
+                        """, (g["id"], g["matchup"], pregame, proy_r3, pregame, # <--- Target ahora es pregame
                               decision, vivo, cuota, datetime.now(timezone.utc).isoformat()))
                         
                         if cur.rowcount > 0:
@@ -405,16 +410,15 @@ def job_escaner():
                                 f"⏱️ Estado: P{g['period']} ({g['clock']})\n\n"
                                 f"📌 Línea en vivo: {vivo}\n"
                                 f"🪙 Cuota {decision.capitalize()}: @{cuota:.2f}\n\n"
-                                f"💡 Recomendación: {flecha} <b>{decision} {vivo}</b>"
+                                f"🎯 Target (Pregame): {pregame}\n"
+                                f"💡 Recomendación: {flecha} <b>{decision} {pregame}</b>"
                             )
                             if enviar_telegram(msg):
                                 log.info(f"✅ Alerta #{alert_id} (Regla 3) enviada a Telegram.")
                         else:
                             log.info(f"⏭️ [REGLA 3] {g['matchup']} ya se había disparado antes.")
                     else:
-                        log.info(f"⏭️ [REGLA 3] Empate exacto ({vivo}), no se apuesta.")
-                else:
-                    log.info(f"⏭️ [REGLA 3] {g['matchup']} aún no suma puntos (0-0).")
+                        log.info(f"⏭️ [REGLA 3] Sin valor (vivo {vivo} vs target {pregame}).")
 
 # ==========================================
 # JOB 3: AUDITOR
