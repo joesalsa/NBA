@@ -246,17 +246,23 @@ def job_recolector():
 # ==========================================
 # JOB 2: ESCÁNER + REGLAS
 # ==========================================
-def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln):
+def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target_base, vivo, ln):
     if proy == pregame: return
 
     if regla == 1:
         decision = "UNDER" if proy > pregame else "OVER"
-        if decision == "UNDER" and vivo < target: return
-        if decision == "OVER" and vivo > target: return
+        if decision == "UNDER" and vivo < target_base: return
+        if decision == "OVER" and vivo > target_base: return
     else:
         decision = "OVER" if proy > pregame else "UNDER"
-        if decision == "OVER" and vivo > target: return
-        if decision == "UNDER" and vivo < target: return
+        if decision == "OVER" and vivo > target_base: return
+        if decision == "UNDER" and vivo < target_base: return
+
+    # Lógica Dinámica del Target: Buscar la mejor línea disponible
+    if decision == "UNDER":
+        target = max(target_base, vivo)
+    else:
+        target = min(target_base, vivo)
 
     cuota = ln["under"] if decision == "UNDER" else ln["over"]
     
@@ -277,7 +283,8 @@ def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target, vivo, ln
             f"⏱️ Estado: P{g['period']} ({g['clock']})\n\n"
             f"📌 Línea en vivo: {vivo}\n"
             f"🪙 Cuota {decision.capitalize()}: @{cuota:.2f}\n\n"
-            f"💡 Recomendación: {flecha} <b>{decision} {vivo}</b>"
+            f"🎯 Target ({'Mejor línea' if target != target_base else 'Base'}): {target}\n"
+            f"💡 Recomendación: {flecha} <b>{decision} {target}</b>"
         )
         if enviar_telegram(msg):
             log.info(f"✅ Alerta #{alert_id} (Regla {regla}) enviada a Telegram.")
@@ -302,7 +309,6 @@ def job_escaner():
 
     validos = []
     for g in en_vivo:
-        # Solo HT (period 2, 0:00), Q3 y Q4 son válidos
         is_ht_exact = (g["period"] == 2 and g["clock"] in ["0:00", "0.0"])
         is_q3_q4 = g["period"] in (3, 4)
         
@@ -397,13 +403,19 @@ def job_escaner():
                         if vivo < pregame: decision = None
                         
                     if decision:
+                        # Lógica Dinámica del Target para Regla 3
+                        if decision == "UNDER":
+                            target_r3 = max(pregame, vivo)
+                        else:
+                            target_r3 = min(pregame, vivo)
+
                         cuota = ln["under"] if decision == "UNDER" else ln["over"]
                         cur = con.execute("""
                             INSERT OR IGNORE INTO alertas
                             (event_id, matchup, regla, checkpoint, pregame_line, proyeccion, target_line,
                              decision, live_line_at_alert, cuota, created_at)
                             VALUES (?, ?, 3, 'EndQ3', ?, ?, ?, ?, ?, ?, ?)
-                        """, (g["id"], g["matchup"], pregame, proy_r3, pregame,
+                        """, (g["id"], g["matchup"], pregame, proy_r3, target_r3,
                               decision, vivo, cuota, datetime.now(timezone.utc).isoformat()))
                         
                         if cur.rowcount > 0:
@@ -415,8 +427,8 @@ def job_escaner():
                                 f"⏱️ Estado: P{g['period']} ({g['clock']})\n\n"
                                 f"📌 Línea en vivo: {vivo}\n"
                                 f"🪙 Cuota {decision.capitalize()}: @{cuota:.2f}\n\n"
-                                f"🎯 Target (Pregame): {pregame}\n"
-                                f"💡 Recomendación: {flecha} <b>{decision} {pregame}</b>"
+                                f"🎯 Target ({'Mejor línea' if target_r3 != pregame else 'Pregame'}): {target_r3}\n"
+                                f"💡 Recomendación: {flecha} <b>{decision} {target_r3}</b>"
                             )
                             if enviar_telegram(msg):
                                 log.info(f"✅ Alerta #{alert_id} (Regla 3) enviada a Telegram.")
@@ -569,3 +581,4 @@ def health_check():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+    
