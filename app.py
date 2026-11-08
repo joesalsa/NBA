@@ -149,13 +149,21 @@ def get_matchup_key(team_a, team_b):
     return "_vs_".join(sorted([t1, t2]))
 
 # ==========================================
-# UTILIDADES
+# UTILIDADES (CORREGIDO PARA DECIMALES)
 # ==========================================
 def clock_to_seconds(clock_str):
     if not clock_str: return None
-    m = re.match(r"(\d+):(\d+)", clock_str.strip())
-    if not m: return None
-    return int(m.group(1)) * 60 + int(m.group(2))
+    clock_str = clock_str.strip()
+    
+    # Si tiene formato MM:SS
+    if ":" in clock_str:
+        m = re.match(r"(\d+):(\d+)", clock_str)
+        if not m: return None
+        return int(m.group(1)) * 60 + int(m.group(2))
+    else:
+        # Si tiene formato SS.s (como "0.1" o "0.0")
+        try: return float(clock_str)
+        except: return None
 
 def enviar_telegram(msg):
     try:
@@ -190,7 +198,7 @@ def parse_espn_game(ev):
         "matchup": get_matchup_key(away_name, home_name),
         "display_name": f"{away_name} vs {home_name}",
         "state": st.get("type", {}).get("state", ""),
-        "desc": st.get("type", {}).get("description", ""), # <-- AGREGADO PARA HT
+        "desc": st.get("type", {}).get("description", ""),
         "period": int(st.get("period") or 0),
         "clock": st.get("displayClock", "") or "",
         "q_h": q_h,
@@ -259,7 +267,6 @@ def _evaluar_y_alerta(con, g, regla, checkpoint, pregame, proy, target_base, viv
         if decision == "OVER" and vivo > target_base: return
         if decision == "UNDER" and vivo < target_base: return
 
-    # Lógica Dinámica del Target: Buscar la mejor línea disponible
     if decision == "UNDER":
         target = max(target_base, vivo)
     else:
@@ -310,15 +317,24 @@ def job_escaner():
 
     validos = []
     for g in en_vivo:
-        # Ahora detectamos el HT por la descripción, sin importar el reloj
-        is_ht_exact = ("Halftime" in g["desc"]) or (g["period"] == 2 and g["clock"] in ["0:00", "0.0", "00:00", ""])
-        is_q3_q4 = g["period"] in (3, 4)
+        secs = clock_to_seconds(g["clock"])
         
-        if not (is_ht_exact or is_q3_q4): 
+        # CORRECCIÓN: Atrapamos el HT si faltan 3 segundos o menos para terminar el Q2
+        is_ht_exact = ("Halftime" in g["desc"]) or (g["period"] == 2 and (g["clock"] == "" or (secs is not None and secs <= 3.0)))
+        
+        # CORRECCIÓN: Atrapamos el fin del Q3 si faltan 3 segundos o menos
+        is_end_q3 = (g["period"] == 3 and (secs is not None and secs <= 3.0))
+        
+        # Inicio del Q4
+        is_start_q4 = (g["period"] == 4 and (secs is not None and secs >= 660))
+        
+        # Si está en Q4 pero no es el inicio, solo lo evaluamos para la Regla 1
+        is_q4_any = (g["period"] == 4 and (secs is not None and secs >= 120))
+        
+        if not (is_ht_exact or is_end_q3 or is_start_q4 or is_q4_any): 
             continue
         
         if g["period"] == 4:
-            secs = clock_to_seconds(g["clock"])
             if secs is None or secs < 120: 
                 log.info(f"⏭️ [ESCÁNER] Saltando {g['matchup']} (Q4 con < 2 mins)")
                 continue
@@ -370,25 +386,26 @@ def job_escaner():
         with db() as con:
             pre_row = con.execute("SELECT line FROM pregame_lines WHERE matchup=? ORDER BY updated_at DESC LIMIT 1", (g["matchup"],)).fetchone()
             pregame = float(pre_row[0]) if pre_row else 0.0
+            secs = clock_to_seconds(g["clock"])
 
             log.info(f"⚙️ [EVALUANDO] {g['matchup']} | P{g['period']} {g['clock']} | Vivo: {vivo} | Pregame: {pregame if pre_row else 'N/A'}")
 
             # Regla 1 (Solo Q4)
-            if g["period"] == 4 and pre_row:
+            if g["period"] == 4 and pre_row and (secs is not None and secs >= 120):
                 t3 = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
                 proy = t3 * 1.25
                 _evaluar_y_alerta(con, g, 1, "Q4", pregame, proy, proy, vivo, ln)
 
             # Regla 2 (SOLO AL FINALIZAR EL 2DO CUARTO - HT EXACTO)
-            is_ht_exact = ("Halftime" in g["desc"]) or (g["period"] == 2 and (g["clock"] in ["0:00", "0.0", "00:00", ""]))
+            is_ht_exact = ("Halftime" in g["desc"]) or (g["period"] == 2 and (g["clock"] == "" or (secs is not None and secs <= 3.0)))
             if is_ht_exact and pre_row:
                 ht = sum(g["q_h"][:2]) + sum(g["q_a"][:2])
                 proy = ht * 2
                 _evaluar_y_alerta(con, g, 2, "HT", pregame, proy, pregame, vivo, ln)
 
             # Regla 3 (Solo al final exacto del Q3 o en el primer minuto del Q4)
-            is_end_q3 = (g["period"] == 3 and (g["clock"] == "0:00" or g["clock"] == "0.0"))
-            is_start_q4 = (g["period"] == 4 and (clock_to_seconds(g["clock"]) or 0) >= 660) # 660 segs = 11:00
+            is_end_q3 = (g["period"] == 3 and (secs is not None and secs <= 3.0))
+            is_start_q4 = (g["period"] == 4 and (secs is not None and secs >= 660))
             
             if (is_end_q3 or is_start_q4) and pre_row:
                 t3_sum = sum(g["q_h"][:3]) + sum(g["q_a"][:3])
@@ -405,7 +422,6 @@ def job_escaner():
                         if vivo < pregame: decision = None
                         
                     if decision:
-                        # Lógica Dinámica del Target para Regla 3
                         if decision == "UNDER":
                             target_r3 = max(pregame, vivo)
                         else:
